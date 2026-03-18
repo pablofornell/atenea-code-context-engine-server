@@ -1,0 +1,25 @@
+[project]
+name = "atenea-server"
+version = "0.1.0"
+description = "Atenea Context Engine - Backend Server"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "qdrant-client>=1.8.0",
+    "httpx>=0.27.0",
+    "tree-sitter>=0.21.3",
+    "tree-sitter-languages>=1.10.2",
+    "tqdm>=4.66.0",
+    "aiohttp>=3.9.0",
+]
+
+[project.scripts]
+atenea-server = "atenea_server.api:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["atenea_server*"]
