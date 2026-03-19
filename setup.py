@@ -16,17 +16,31 @@ def setup():
     is_windows = platform.system() == "Windows"
     python_cmd = "python" if is_windows else "python3"
     venv_dir = ".venv"
+    venv_python = os.path.join(venv_dir, "Scripts", "python") if is_windows else os.path.join(venv_dir, "bin", "python")
     
     print(f"--- Setting up Atenea Server ({platform.system()}) ---")
 
-    # 1. Create Venv
+    # 1. Clean up stale build artifacts that can cause issues on Windows
+    print("--- Cleaning up old build artifacts ---")
+    for d in ["build", "atenea_server.egg-info", "atenea.egg-info"]:
+        if os.path.exists(d):
+            import shutil
+            try:
+                shutil.rmtree(d)
+            except Exception:
+                pass
+
+    # 2. Create Venv
     if not os.path.exists(venv_dir):
         if not run_command(f"{python_cmd} -m venv {venv_dir}"):
             return
 
-    # 2. Install dependencies
-    pip_path = os.path.join(venv_dir, "Scripts", "pip") if is_windows else os.path.join(venv_dir, "bin", "pip")
-    if not run_command(f"{pip_path} install -e ."):
+    # 3. Upgrade pip and setuptools
+    print("--- Upgrading pip and setuptools ---")
+    run_command(f"{venv_python} -m pip install --upgrade pip setuptools")
+
+    # 4. Install dependencies
+    if not run_command(f"{venv_python} -m pip install -e ."):
         return
 
     # 3. Docker Compose
