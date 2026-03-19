@@ -1,6 +1,6 @@
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
-from typing import List, Optional
+from typing import List, Optional, Dict
 import os
 from .chunker import Chunk
 
@@ -26,7 +26,7 @@ class VectorStore:
         response = self.client.get_collections()
         return [c.name for c in response.collections]
 
-    def upsert_chunks(self, chunks: List[Chunk], embeddings: List[List[float]], collection_name: Optional[str] = None):
+    def upsert_chunks(self, chunks: List[Chunk], embeddings: List[List[float]], collection_name: Optional[str] = None, content_hash: Optional[str] = None):
         if not chunks:
             return
 
@@ -39,6 +39,9 @@ class VectorStore:
             from hashlib import md5
             point_id = md5(id_input.encode()).hexdigest()
 
+            # Retrieve content_hash from chunk if available
+            c_hash = getattr(chunk, 'content_hash', content_hash)
+
             points.append(models.PointStruct(
                 id=point_id,
                 vector=embedding,
@@ -47,7 +50,8 @@ class VectorStore:
                     "start_line": chunk.start_line,
                     "end_line": chunk.end_line,
                     "content": chunk.content,
-                    "language": chunk.language
+                    "language": chunk.language,
+                    "content_hash": c_hash
                 }
             ))
 
@@ -91,3 +95,58 @@ class VectorStore:
             return res.count > 0
         except Exception:
             return False
+
+    def get_file_hashes(self, collection_name: Optional[str] = None) -> Dict[str, str]:
+        """Fetch all unique file_path -> content_hash mappings from the collection."""
+        target = collection_name or self.default_collection
+        hashes = {}
+        
+        try:
+            # Scroll through points to get metadata
+            # For a massive codebase, we might want a more efficient way or indexing hashes specifically,
+            # but for MVP scrolling is fine.
+            offset = None
+            while True:
+                response = self.client.scroll(
+                    collection_name=target,
+                    limit=100,
+                    with_payload=["file_path", "content_hash"],
+                    offset=offset
+                )
+                for point in response[0]:
+                    payload = point.payload
+                    path = payload.get("file_path")
+                    h = payload.get("content_hash")
+                    if path and h:
+                        hashes[path] = h
+                
+                offset = response[1]
+                if offset is None:
+                    break
+        except Exception as e:
+            from .api import logger
+            logger.warning(f"Error fetching existing hashes: {e}")
+            
+        return hashes
+
+    def delete_by_file_paths(self, file_paths: List[str], collection_name: Optional[str] = None):
+        """Delete all points associated with the given file paths."""
+        if not file_paths:
+            return
+            
+        target = collection_name or self.default_collection
+        try:
+            self.client.delete(
+                collection_name=target,
+                points_selector=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="file_path",
+                            match=models.MatchAny(any=file_paths)
+                        )
+                    ]
+                )
+            )
+        except Exception as e:
+            from .api import logger
+            logger.error(f"Error deleting old chunks: {e}")

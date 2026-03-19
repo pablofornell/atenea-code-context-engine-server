@@ -43,24 +43,53 @@ class AteneaAPI:
             logger.error(f"Error listing collections: {e}")
             return web.json_response({"error": str(e)}, status=500)
 
+    async def handle_hashes(self, request):
+        try:
+            collection_name = request.query.get("collection")
+            hashes = self.vector_store.get_file_hashes(collection_name=collection_name)
+            return web.json_response({
+                "status": "ok",
+                "hashes": hashes
+            })
+        except Exception as e:
+            logger.error(f"Error fetching hashes: {e}")
+            return web.json_response({"error": str(e)}, status=500)
+
     async def handle_index(self, request):
         try:
             data = await request.json()
             files = data.get("files", [])
             collection_name = data.get("collection")
+            deleted_files = data.get("deleted_files", [])
+            
+            # Handle deletions first
+            if deleted_files:
+                logger.info(f"Deleting {len(deleted_files)} files from {collection_name or 'default'}")
+                self.vector_store.delete_by_file_paths(deleted_files, collection_name=collection_name)
+
+            if not files and not deleted_files:
+                return web.json_response({"error": "No files or deleted_files provided"}, status=400)
             
             if not files:
-                return web.json_response({"error": "No files provided"}, status=400)
+                return web.json_response({
+                    "status": "ok", 
+                    "message": f"Successfully deleted {len(deleted_files)} files",
+                    "chunks": 0
+                })
 
             all_chunks = []
             for f in files:
                 path = f.get("path")
                 content = f.get("content", "")
+                content_hash = f.get("content_hash")
                 if not path or not content.strip():
                     continue
                 
                 # Re-use chunker
                 file_chunks = self.chunker.chunk_file(path, content)
+                # Attach hash to chunks so vector_store can save it
+                for chunk in file_chunks:
+                    setattr(chunk, 'content_hash', content_hash)
                 all_chunks.extend(file_chunks)
 
             if not all_chunks:
@@ -77,6 +106,12 @@ class AteneaAPI:
                 async with semaphore:
                     contents = [c.content for c in batch_chunks]
                     embeddings = await self.embedder.embed(contents)
+                    # Use the hash from the first chunk of the file (they are grouped)
+                    # Or more accurately, upsert_chunks handles it per call.
+                    # Since batches might contain chunks from different files, 
+                    # we'll need to update upsert_chunks to take hash per chunk or 
+                    # handle it differently.
+                    # Actually, let's keep it simple: pass the hash in the payload loop inside upsert_chunks.
                     self.vector_store.upsert_chunks(batch_chunks, embeddings, collection_name=collection_name)
                     logger.info(f"Indexed batch {batch_idx + 1} to {collection_name or 'default'} via API...")
 
@@ -131,6 +166,7 @@ def main():
     app.add_routes([
         web.get('/api/status', api.handle_status),
         web.get('/api/list', api.handle_list),
+        web.get('/api/index/hashes', api.handle_hashes),
         web.post('/api/index', api.handle_index),
         web.post('/api/query', api.handle_query),
         web.delete('/api/index', api.handle_clean),
