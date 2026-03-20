@@ -77,52 +77,49 @@ class AteneaAPI:
                     "chunks": 0
                 })
 
-            all_chunks = []
-            for f in files:
-                path = f.get("path")
-                content = f.get("content", "")
-                content_hash = f.get("content_hash")
-                if not path or not content.strip():
-                    continue
-                
-                # Re-use chunker
-                file_chunks = self.chunker.chunk_file(path, content)
-                # Attach hash to chunks so vector_store can save it
-                for chunk in file_chunks:
-                    setattr(chunk, 'content_hash', content_hash)
-                all_chunks.extend(file_chunks)
-
-            if not all_chunks:
-                return web.json_response({"status": "ok", "message": "No chunks found to index", "chunks": 0})
-
-            # Re-use indexer logic for embedding and storing
-            # This is a bit of a hack since indexer doesn't have a public "index_chunks" method yet
-            # but we can implement it here or refactor indexer.
-            
-            batch_size = 50
-            semaphore = asyncio.Semaphore(2)
-
-            async def process_batch(batch_idx: int, batch_chunks: List[Chunk]):
+            async def process_chunks(chunks_to_index: List[Chunk]):
                 async with semaphore:
-                    contents = [c.content for c in batch_chunks]
+                    contents = [c.content for c in chunks_to_index]
                     embeddings = await self.embedder.embed(contents)
-                    # Use the hash from the first chunk of the file (they are grouped)
-                    # Or more accurately, upsert_chunks handles it per call.
-                    # Since batches might contain chunks from different files, 
-                    # we'll need to update upsert_chunks to take hash per chunk or 
-                    # handle it differently.
-                    # Actually, let's keep it simple: pass the hash in the payload loop inside upsert_chunks.
-                    self.vector_store.upsert_chunks(batch_chunks, embeddings, collection_name=collection_name)
-                    logger.info(f"Indexed batch {batch_idx + 1} to {collection_name or 'default'} via API...")
+                    self.vector_store.upsert_chunks(chunks_to_index, embeddings, collection_name=collection_name)
 
-            batches = [all_chunks[i:i+batch_size] for i in range(0, len(all_chunks), batch_size)]
-            tasks = [process_batch(i, batch) for i, batch in enumerate(batches)]
-            await asyncio.gather(*tasks)
+            semaphore = asyncio.Semaphore(2)
+            total_chunks = 0
+            
+            # Process files in small groups to avoid memory spikes
+            file_batch_size = 5
+            for i in range(0, len(files), file_batch_size):
+                file_batch = files[i : i + file_batch_size]
+                current_batch_chunks = []
+                
+                for f in file_batch:
+                    path = f.get("path")
+                    content = f.get("content", "")
+                    content_hash = f.get("content_hash")
+                    if not path or not content.strip():
+                        continue
+                    
+                    file_chunks = self.chunker.chunk_file(path, content)
+                    for chunk in file_chunks:
+                        setattr(chunk, 'content_hash', content_hash)
+                    current_batch_chunks.extend(file_chunks)
+                
+                if current_batch_chunks:
+                    # Further batch chunks for embedding if they are too many
+                    chunk_batch_size = 50
+                    tasks = []
+                    for j in range(0, len(current_batch_chunks), chunk_batch_size):
+                        chunk_batch = current_batch_chunks[j : j + chunk_batch_size]
+                        tasks.append(process_chunks(chunk_batch))
+                    
+                    await asyncio.gather(*tasks)
+                    total_chunks += len(current_batch_chunks)
+                    logger.info(f"Indexed batch of {len(file_batch)} files ({len(current_batch_chunks)} chunks) to {collection_name or 'default'}...")
 
             return web.json_response({
                 "status": "ok",
                 "message": f"Successfully indexed {len(files)} files",
-                "chunks": len(all_chunks)
+                "chunks": total_chunks
             })
         except Exception as e:
             logger.error(f"Error indexing: {e}")
