@@ -1,5 +1,4 @@
 import asyncio
-import logging
 import os
 from aiohttp import web
 from typing import List
@@ -10,10 +9,11 @@ from .vector_store import VectorStore
 from .indexer import Indexer
 from .retriever import Retriever
 from .formatter import Formatter
+from .logging_config import setup_logging, get_logger
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("atenea.api")
+# Setup logging once at module import
+setup_logging()
+logger = get_logger(__name__)
 
 class AteneaAPI:
     def __init__(self):

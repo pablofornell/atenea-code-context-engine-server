@@ -40,7 +40,6 @@ async def compare_queries(codebase_path: str, queries: List[str]):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_init = True
     parser.add_argument("--codebase", default="./codebases/Android-SimpleTimeTracker")
     parser.add_argument("--queries", nargs="+", default=["RecordTypeDBO", "Timer logic"])
     

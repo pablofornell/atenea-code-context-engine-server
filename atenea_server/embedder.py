@@ -1,8 +1,13 @@
 import httpx
+import os
 from typing import List, Optional, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Default configuration - can be overridden via environment variables
+DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
+DEFAULT_OLLAMA_URL = "http://localhost:11434"
 
 
 class EmbeddingError(Exception):
@@ -11,9 +16,14 @@ class EmbeddingError(Exception):
 
 
 class Embedder:
-    def __init__(self, model: str = "nomic-embed-text", base_url: str = "http://localhost:11434"):
-        self.model = model
-        self.base_url = f"{base_url}/api/embed"
+    def __init__(
+        self,
+        model: Optional[str] = None,
+        base_url: Optional[str] = None
+    ):
+        self.model = model or os.environ.get("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+        ollama_url = base_url or os.environ.get("OLLAMA_URL", DEFAULT_OLLAMA_URL)
+        self.base_url = f"{ollama_url}/api/embed"
         self._dimension: Optional[int] = None
 
     async def embed(self, texts: List[str], raise_on_error: bool = True) -> List[List[float]]:

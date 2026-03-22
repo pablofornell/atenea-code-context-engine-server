@@ -106,7 +106,7 @@ class BM25Index:
         return tokens
 
     def add_document(self, doc_id: str, file_path: str, content: str,
-                     start_line: int, end_line: int, language: str):
+                     start_line: int, end_line: int, language: str) -> None:
         """Add a document to the index."""
         tokens = self._tokenize(content)
         
@@ -137,7 +137,7 @@ class BM25Index:
         self.num_docs = len(self.documents)
         self._update_avg_doc_length()
 
-    def _remove_document(self, doc_id: str):
+    def _remove_document(self, doc_id: str) -> None:
         """Remove a document from the index."""
         if doc_id not in self.documents:
             return
@@ -155,7 +155,7 @@ class BM25Index:
         del self.documents[doc_id]
         del self.doc_lengths[doc_id]
 
-    def _update_avg_doc_length(self):
+    def _update_avg_doc_length(self) -> None:
         """Update average document length."""
         if self.doc_lengths:
             self.avg_doc_length = sum(self.doc_lengths.values()) / len(self.doc_lengths)
@@ -246,7 +246,7 @@ class BM25Index:
         scored_docs.sort(key=lambda x: x[1], reverse=True)
         return scored_docs[:limit]
 
-    def clear(self):
+    def clear(self) -> None:
         """Clear all data from the index."""
         self.documents.clear()
         self.inverted_index.clear()
@@ -255,7 +255,7 @@ class BM25Index:
         self.avg_doc_length = 0.0
         self.num_docs = 0
 
-    def build_from_vector_store(self, vector_store, collection_name: Optional[str] = None):
+    def build_from_vector_store(self, vector_store: "VectorStore", collection_name: Optional[str] = None) -> None:
         """
         Build BM25 index from existing vector store data.
 
@@ -263,6 +263,7 @@ class BM25Index:
             vector_store: VectorStore instance to read from
             collection_name: Optional collection name filter
         """
+        from .vector_store import VectorStore  # noqa: F811 - for type checking
         from hashlib import md5
 
         target = collection_name or vector_store.default_collection

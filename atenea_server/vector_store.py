@@ -1,15 +1,34 @@
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from typing import List, Optional, Dict
+import logging
 import os
 from .chunker import Chunk
 
+logger = logging.getLogger(__name__)
+
+# Default configuration - can be overridden via environment variables
+DEFAULT_QDRANT_HOST = "localhost"
+DEFAULT_QDRANT_PORT = 6333
+DEFAULT_EMBEDDING_DIMENSION = 768  # nomic-embed-text dimension
+
+
 class VectorStore:
-    def __init__(self, host: str = "localhost", port: int = 6333):
-        self.client = QdrantClient(host=host, port=port)
+    def __init__(
+        self,
+        host: Optional[str] = None,
+        port: Optional[int] = None,
+        embedding_dimension: Optional[int] = None
+    ):
+        self.host = host or os.environ.get("QDRANT_HOST", DEFAULT_QDRANT_HOST)
+        self.port = port or int(os.environ.get("QDRANT_PORT", DEFAULT_QDRANT_PORT))
+        self.embedding_dimension = embedding_dimension or int(
+            os.environ.get("EMBEDDING_DIMENSION", DEFAULT_EMBEDDING_DIMENSION)
+        )
+        self.client = QdrantClient(host=self.host, port=self.port)
         self.default_collection = "atenea_code"
 
-    def _ensure_collection(self, collection_name: str):
+    def _ensure_collection(self, collection_name: str) -> None:
         try:
             self.client.get_collection(collection_name)
         except Exception:
@@ -17,7 +36,7 @@ class VectorStore:
             self.client.create_collection(
                 collection_name=collection_name,
                 vectors_config=models.VectorParams(
-                    size=768,  # nomic-embed-text dimension
+                    size=self.embedding_dimension,
                     distance=models.Distance.COSINE
                 )
             )
@@ -26,7 +45,7 @@ class VectorStore:
         response = self.client.get_collections()
         return [c.name for c in response.collections]
 
-    def upsert_chunks(self, chunks: List[Chunk], embeddings: List[List[float]], collection_name: Optional[str] = None, content_hash: Optional[str] = None):
+    def upsert_chunks(self, chunks: List[Chunk], embeddings: List[List[float]], collection_name: Optional[str] = None, content_hash: Optional[str] = None) -> None:
         if not chunks:
             return
 
@@ -78,7 +97,7 @@ class VectorStore:
         )
         return [hit.payload for hit in results.points]
 
-    def clear_collection(self, collection_name: Optional[str] = None):
+    def clear_collection(self, collection_name: Optional[str] = None) -> None:
         """Delete and recreate the collection."""
         target = collection_name or self.default_collection
         try:
@@ -124,12 +143,11 @@ class VectorStore:
                 if offset is None:
                     break
         except Exception as e:
-            from .api import logger
             logger.warning(f"Error fetching existing hashes: {e}")
             
         return hashes
 
-    def delete_by_file_paths(self, file_paths: List[str], collection_name: Optional[str] = None):
+    def delete_by_file_paths(self, file_paths: List[str], collection_name: Optional[str] = None) -> None:
         """Delete all points associated with the given file paths."""
         if not file_paths:
             return
@@ -148,5 +166,4 @@ class VectorStore:
                 )
             )
         except Exception as e:
-            from .api import logger
             logger.error(f"Error deleting old chunks: {e}")
