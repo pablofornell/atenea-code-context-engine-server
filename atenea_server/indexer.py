@@ -1,9 +1,9 @@
 import os
 import asyncio
-from typing import List, Set
+from typing import List, Set, Tuple
 import logging
 from .chunker import Chunker, Chunk
-from .embedder import Embedder
+from .embedder import Embedder, EmbeddingError
 from .vector_store import VectorStore
 
 logging.basicConfig(level=logging.INFO)
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 class Indexer:
     def __init__(self, chunker: Chunker, embedder: Embedder, vector_store: VectorStore):
         self.chunker = chunker
-        self.embeder = embedder
+        self.embedder = embedder
         self.vector_store = vector_store
         self.ignored_dirs = {
             ".git", "build", "node_modules", ".gradle", ".venv", "venv", 
@@ -66,24 +66,59 @@ class Indexer:
             return
 
         logger.info(f"Found {len(all_chunks)} chunks. Generating embeddings...")
-        
+
         # Batch processing with parallelism
         batch_size = 50
-        semaphore = asyncio.Semaphore(2) # Limit concurrency to avoid overloading Ollama
+        semaphore = asyncio.Semaphore(2)  # Limit concurrency to avoid overloading Ollama
+        failed_chunks: List[Tuple[int, str]] = []  # (batch_idx, error_message)
+        successful_chunks = 0
 
-        async def process_batch(batch_idx: int, batch_chunks: List[Chunk]):
+        async def process_batch(batch_idx: int, batch_chunks: List[Chunk]) -> bool:
+            nonlocal successful_chunks
             async with semaphore:
                 contents = [c.content for c in batch_chunks]
-                embeddings = await self.embeder.embed(contents)
-                self.vector_store.upsert_chunks(batch_chunks, embeddings)
-                logger.info(f"Indexed batch {batch_idx + 1}...")
+                try:
+                    embeddings, failed_indices = await self.embedder.embed_with_fallback(contents)
+
+                    if failed_indices:
+                        # Some chunks failed - only index the successful ones
+                        successful_embeddings = []
+                        successful_batch_chunks = []
+                        for i, (chunk, emb) in enumerate(zip(batch_chunks, embeddings)):
+                            if i not in failed_indices:
+                                successful_embeddings.append(emb)
+                                successful_batch_chunks.append(chunk)
+
+                        if successful_embeddings:
+                            self.vector_store.upsert_chunks(successful_batch_chunks, successful_embeddings)
+                            successful_chunks += len(successful_batch_chunks)
+
+                        failed_chunks.append((batch_idx, f"{len(failed_indices)} chunks failed"))
+                        logger.warning(f"Batch {batch_idx + 1}: {len(failed_indices)} chunks skipped due to embedding errors")
+                    else:
+                        # All chunks succeeded
+                        self.vector_store.upsert_chunks(batch_chunks, embeddings)
+                        successful_chunks += len(batch_chunks)
+
+                    logger.info(f"Indexed batch {batch_idx + 1}/{len(batches)}...")
+                    return True
+
+                except EmbeddingError as e:
+                    failed_chunks.append((batch_idx, str(e)))
+                    logger.error(f"Batch {batch_idx + 1} failed completely: {e}")
+                    return False
 
         batches = [all_chunks[i:i+batch_size] for i in range(0, len(all_chunks), batch_size)]
         tasks = [process_batch(i, batch) for i, batch in enumerate(batches)]
-        
+
         await asyncio.gather(*tasks)
-            
-        logger.info("Indexing complete.")
+
+        # Report results
+        if failed_chunks:
+            logger.warning(f"Indexing completed with {len(failed_chunks)} failed batches. "
+                          f"Successfully indexed {successful_chunks}/{len(all_chunks)} chunks.")
+        else:
+            logger.info(f"Indexing complete. Successfully indexed {successful_chunks} chunks.")
 
 if __name__ == "__main__":
     import sys

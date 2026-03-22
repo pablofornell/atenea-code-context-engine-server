@@ -5,7 +5,7 @@ from aiohttp import web
 from typing import List
 
 from .chunker import Chunker, Chunk
-from .embedder import Embedder
+from .embedder import Embedder, EmbeddingError
 from .vector_store import VectorStore
 from .indexer import Indexer
 from .retriever import Retriever
@@ -77,11 +77,26 @@ class AteneaAPI:
                     "chunks": 0
                 })
 
-            async def process_chunks(chunks_to_index: List[Chunk]):
+            async def process_chunks(chunks_to_index: List[Chunk]) -> int:
+                """Process a batch of chunks, returning count of successfully indexed."""
                 async with semaphore:
                     contents = [c.content for c in chunks_to_index]
-                    embeddings = await self.embedder.embed(contents)
-                    self.vector_store.upsert_chunks(chunks_to_index, embeddings, collection_name=collection_name)
+                    try:
+                        embeddings, failed_indices = await self.embedder.embed_with_fallback(contents)
+
+                        if failed_indices:
+                            # Only index successful chunks
+                            successful_chunks = [c for i, c in enumerate(chunks_to_index) if i not in failed_indices]
+                            successful_embeddings = embeddings
+                            if successful_chunks:
+                                self.vector_store.upsert_chunks(successful_chunks, successful_embeddings, collection_name=collection_name)
+                            return len(successful_chunks)
+                        else:
+                            self.vector_store.upsert_chunks(chunks_to_index, embeddings, collection_name=collection_name)
+                            return len(chunks_to_index)
+                    except EmbeddingError as e:
+                        logger.error(f"Failed to embed batch: {e}")
+                        return 0
 
             semaphore = asyncio.Semaphore(2)
             total_chunks = 0
@@ -112,9 +127,13 @@ class AteneaAPI:
                         chunk_batch = current_batch_chunks[j : j + chunk_batch_size]
                         tasks.append(process_chunks(chunk_batch))
                     
-                    await asyncio.gather(*tasks)
-                    total_chunks += len(current_batch_chunks)
-                    logger.info(f"Indexed batch of {len(file_batch)} files ({len(current_batch_chunks)} chunks) to {collection_name or 'default'}...")
+                    results = await asyncio.gather(*tasks)
+                    batch_indexed = sum(results)
+                    total_chunks += batch_indexed
+                    logger.info(f"Indexed batch of {len(file_batch)} files ({batch_indexed} chunks) to {collection_name or 'default'}...")
+
+            # Invalidate BM25 index so it rebuilds on next query
+            self.retriever.invalidate_bm25_index(collection_name=collection_name)
 
             return web.json_response({
                 "status": "ok",
@@ -160,6 +179,8 @@ class AteneaAPI:
             data = await request.json() if request.has_body else {}
             collection_name = data.get("collection")
             self.vector_store.clear_collection(collection_name=collection_name)
+            # Also clear BM25 index
+            self.retriever.invalidate_bm25_index(collection_name=collection_name)
             return web.json_response({"status": "ok", "message": f"Index {collection_name or 'default'} cleared"})
         except Exception as e:
             logger.error(f"Error clearing index: {e}")
