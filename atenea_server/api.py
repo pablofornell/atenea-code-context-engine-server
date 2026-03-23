@@ -1,5 +1,7 @@
 import asyncio
+import json as json_mod
 import os
+from pathlib import Path
 from aiohttp import web
 from typing import List
 
@@ -10,10 +12,58 @@ from .indexer import Indexer
 from .retriever import Retriever
 from .formatter import Formatter
 from .logging_config import setup_logging, get_logger
+from .crypto import get_secret, encrypt, decrypt, ENCRYPTED_HEADER
 
 # Setup logging once at module import
 setup_logging()
 logger = get_logger(__name__)
+
+
+@web.middleware
+async def encryption_middleware(request, handler):
+    """
+    aiohttp middleware that handles AES-256-GCM encryption/decryption.
+
+    - If ATENEA_SECRET is not set, passes requests through unchanged.
+    - Incoming requests with X-Atenea-Encrypted header: decrypt the body.
+    - Outgoing responses: encrypt the body and set X-Atenea-Encrypted header.
+    """
+    key = get_secret()
+    if key is None:
+        return await handler(request)
+
+    # --- Decrypt incoming request body ---
+    if request.headers.get(ENCRYPTED_HEADER) == "1" and request.can_read_body:
+        raw_body = await request.read()
+        try:
+            decrypted = decrypt(raw_body, key)
+        except Exception as e:
+            logger.error(f"Decryption failed: {e}")
+            return web.json_response({"error": "Decryption failed"}, status=400)
+
+        # Replace the request payload so handlers see plain JSON
+        request._payload = asyncio.StreamReader()
+        request._payload.feed_data(decrypted)
+        request._payload.feed_eof()
+        # Reset cached read state so request.json() works
+        request._read_bytes = None
+
+    # --- Call the actual handler ---
+    response = await handler(request)
+
+    # --- Encrypt outgoing response body ---
+    if isinstance(response, web.Response) and response.body:
+        plain_body = response.body
+        if isinstance(plain_body, str):
+            plain_body = plain_body.encode("utf-8")
+        encrypted_body = encrypt(plain_body, key)
+        response = web.Response(
+            body=encrypted_body,
+            status=response.status,
+            headers={ENCRYPTED_HEADER: "1", "Content-Type": "application/octet-stream"},
+        )
+
+    return response
 
 class AteneaAPI:
     def __init__(self):
@@ -186,9 +236,45 @@ class AteneaAPI:
             logger.error(f"Error clearing index: {e}")
             return web.json_response({"error": str(e)}, status=500)
 
+def _load_dotenv() -> None:
+    """
+    Load variables from a .env file into os.environ.
+    Looks for .env in the current working directory, then in the directory
+    one level above this package (i.e. next to the Makefile).
+    Already-set variables are never overwritten, so shell overrides still work.
+    """
+    candidates = [
+        Path.cwd() / ".env",
+        Path(__file__).parent.parent / ".env",  # atenea-server/.env
+    ]
+    for env_path in candidates:
+        if env_path.exists():
+            logger.info(f"Loading config from {env_path}")
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    if key and key not in os.environ:
+                        os.environ[key] = value
+            break  # stop at the first file found
+
+
 def main():
+    _load_dotenv()
     api = AteneaAPI()
-    app = web.Application(client_max_size=100 * 1024 * 1024)  # 100MB
+
+    middlewares = []
+    if get_secret() is not None:
+        middlewares.append(encryption_middleware)
+        logger.info("Encryption enabled (ATENEA_SECRET is set)")
+    else:
+        logger.warning("Encryption disabled (ATENEA_SECRET not set) — traffic is in plaintext")
+
+    app = web.Application(client_max_size=100 * 1024 * 1024, middlewares=middlewares)  # 100MB
     app.add_routes([
         web.get('/api/status', api.handle_status),
         web.get('/api/list', api.handle_list),

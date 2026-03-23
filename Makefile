@@ -5,7 +5,7 @@ setup:
 	ollama pull nomic-embed-text
 
 run:
-	. .venv/bin/activate && atenea-server
+	. .venv/bin/activate && [ -f .env ] && set -a && . ./.env && set +a; atenea-server
 
 clean-index:
 	@for col in $$(curl -s http://localhost:6333/collections | python3 -c "import sys,json; [print(c['name']) for c in json.load(sys.stdin)['result']['collections']]"); do \
